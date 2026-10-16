@@ -84,9 +84,11 @@ impl PoToken {
         }
         let target = webview::Target {
             url: format!("{PAGE}?binding={}", music::escape::component(&binding)),
-            landing: LANDING.to_string(),
-            domain: DOMAIN.to_string(),
-            proof: vec![COOKIE.to_string()],
+            finish: webview::Finish::Cookies {
+                landing: LANDING.to_string(),
+                domain: DOMAIN.to_string(),
+                proof: vec![COOKIE.to_string()],
+            },
             title: String::new(),
             agent: None,
             script: Some(include_str!("potoken.js").to_string()),
@@ -119,7 +121,9 @@ impl PoToken {
                     self.done(&binding, None);
                 }
             }
-            webview::Poll::Closed => {
+            // A cookie window never stops on a redirect, so that answer reads as a page that
+            // closed without one.
+            webview::Poll::Closed | webview::Poll::Redirect(_) => {
                 log::warn!("potoken: the minting page closed before it answered");
                 self.done(&binding, None);
             }

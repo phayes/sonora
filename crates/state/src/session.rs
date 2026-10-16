@@ -118,7 +118,8 @@ pub struct Session {
     task: Option<Task<()>>,
     prompt_task: Option<Task<()>>,
     input: Option<UnboundedSender<String>>,
-    /// The browser window a `SignInPrompt::Secret` opened, while it is up.
+    /// The browser window a `SignInPrompt::Secret` or `SignInPrompt::Browser` opened, while it
+    /// is up.
     window: Option<webview::Page>,
     window_task: Option<Task<()>>,
     local_provider: Arc<dyn MusicProvider>,
@@ -287,7 +288,10 @@ impl Session {
     /// or no account is stored yet and the sign-in screen offers every provider.
     pub fn wants_browser(&self) -> bool {
         match self.active {
-            Some(index) => self.providers[index].web_sign_in().is_some(),
+            Some(index) => {
+                let provider = &self.providers[index];
+                provider.web_sign_in().is_some() || provider.browser_sign_in()
+            }
             None => !self.providers.iter().any(|provider| provider.stored()),
         }
     }
@@ -472,10 +476,14 @@ impl Session {
             while let Some(prompt) = prompt_rx.recv().await {
                 this.update(cx, |this, cx| {
                     if matches!(this.state, SessionState::Authorizing(_)) {
-                        let secret = matches!(prompt, SignInPrompt::Secret);
+                        let window = match &prompt {
+                            SignInPrompt::Secret => matches!(secret_input, SecretInput::Browser),
+                            SignInPrompt::Browser { .. } => true,
+                            _ => false,
+                        };
                         this.state = SessionState::Authorizing(Some(prompt));
                         cx.notify();
-                        if secret && matches!(secret_input, SecretInput::Browser) {
+                        if window {
                             this.open_window(cx);
                         }
                     }
@@ -533,30 +541,45 @@ impl Session {
         cx.emit(SessionEvent::SignedOut);
     }
 
-    /// Opens the browser window for the secret prompt now showing. The window answers the prompt
-    /// itself once the user is through; closing it cancels the sign-in.
+    /// Opens the browser window for the secret or browser prompt now showing. The window answers
+    /// the prompt itself once the user is through; closing it cancels the sign-in.
     fn open_window(&mut self, cx: &mut Context<Self>) {
-        if !matches!(
-            self.state,
-            SessionState::Authorizing(Some(SignInPrompt::Secret))
-        ) || self.window.is_some()
-        {
+        if self.window.is_some() {
             return;
         }
         let Some(index) = self.awaiting else {
             return;
         };
         let provider = &self.providers[index];
-        let Some(sign_in) = provider.web_sign_in() else {
-            return;
+        let (url, finish, agent) = match &self.state {
+            SessionState::Authorizing(Some(SignInPrompt::Secret)) => {
+                let Some(sign_in) = provider.web_sign_in() else {
+                    return;
+                };
+                let finish = webview::Finish::Cookies {
+                    landing: sign_in.landing.to_string(),
+                    domain: sign_in.domain.to_string(),
+                    proof: sign_in.proof.iter().map(ToString::to_string).collect(),
+                };
+                (
+                    sign_in.url.to_string(),
+                    finish,
+                    sign_in.agent.map(str::to_owned),
+                )
+            }
+            SessionState::Authorizing(Some(SignInPrompt::Browser { url, redirect })) => {
+                let finish = webview::Finish::Redirect {
+                    prefix: redirect.clone(),
+                };
+                (url.clone(), finish, None)
+            }
+            _ => return,
         };
         let target = webview::Target {
-            url: sign_in.url.to_string(),
-            landing: sign_in.landing.to_string(),
-            domain: sign_in.domain.to_string(),
-            proof: sign_in.proof.iter().map(ToString::to_string).collect(),
+            url,
+            finish,
             title: t!("login-window-title", provider = provider.name()).to_string(),
-            agent: sign_in.agent.map(str::to_owned),
+            agent,
             script: None,
         };
         match webview::Page::open(target) {
@@ -584,9 +607,9 @@ impl Session {
                             this.cancel_sign_in(cx);
                             false
                         }
-                        webview::Poll::Cookies(header) => {
+                        webview::Poll::Cookies(answer) | webview::Poll::Redirect(answer) => {
                             this.window = None;
-                            this.submit_input(header, cx);
+                            this.submit_input(answer, cx);
                             false
                         }
                     }
@@ -603,7 +626,7 @@ impl Session {
             self.window = None;
             input.send(text).ok();
             if let SessionState::Authorizing(Some(
-                SignInPrompt::Secret | SignInPrompt::Accounts(_),
+                SignInPrompt::Secret | SignInPrompt::Browser { .. } | SignInPrompt::Accounts(_),
             )) = &self.state
             {
                 self.state = SessionState::Authorizing(None);

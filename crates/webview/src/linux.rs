@@ -19,8 +19,8 @@ use std::time::Duration;
 
 use anyhow::{Context as _, Result, bail};
 
-use crate::native::{Fetch, HEIGHT, MIN_HEIGHT, MIN_WIDTH, Reading, WIDTH, host};
-use crate::{Cookie, Target};
+use crate::native::{Fetch, HEIGHT, MIN_HEIGHT, MIN_WIDTH, Reading, WIDTH};
+use crate::{Cookie, Finish, Target};
 
 /// The sonames to try, newest first. 4.1 and 4.0 differ only in the libsoup they carry, and every
 /// symbol used here is spelled the same in both.
@@ -192,8 +192,8 @@ struct Live {
     context: Ptr,
     cookies: Ptr,
     /// What the cookie manager is asked for: the landing page, so that its own host and the parent
-    /// domain both come back.
-    uri: CString,
+    /// domain both come back. A redirect window reads no cookies and has none.
+    uri: Option<CString>,
 }
 
 pub(crate) struct Window {
@@ -265,9 +265,8 @@ impl Window {
         self.session.state.lock().unwrap().closed
     }
 
-    pub(crate) fn host(&self) -> Option<String> {
-        let uri = self.session.state.lock().unwrap().uri.clone()?;
-        host(&uri)
+    pub(crate) fn url(&self) -> Option<String> {
+        self.session.state.lock().unwrap().uri.clone()
     }
 
     /// Hands back a finished cookie read, or asks the GTK thread for one when none is in flight.
@@ -366,8 +365,13 @@ impl Live {
             CString::new(session.target.url.as_str()).context("the sign-in url is not text")?;
         let title =
             CString::new(session.target.title.as_str()).context("the window title is not text")?;
-        let uri = CString::new(format!("https://{}/", session.target.landing))
-            .context("the landing host is not text")?;
+        let uri = match &session.target.finish {
+            Finish::Cookies { landing, .. } => Some(
+                CString::new(format!("https://{landing}/"))
+                    .context("the landing host is not text")?,
+            ),
+            Finish::Redirect { .. } => None,
+        };
         let agent = CString::new(session.target.agent.as_deref().unwrap_or(USER_AGENT))
             .context("the user agent is not text")?;
 
@@ -461,12 +465,12 @@ impl Live {
         if let Some(url) = load {
             unsafe { (api.webkit_web_view_load_uri)(self.view, url.as_ptr()) };
         }
-        if wanted {
+        if let (true, Some(uri)) = (wanted, &self.uri) {
             let held = Arc::into_raw(self.session.clone()) as Ptr;
             unsafe {
                 (api.webkit_cookie_manager_get_cookies)(
                     self.cookies,
-                    self.uri.as_ptr(),
+                    uri.as_ptr(),
                     ptr::null_mut(),
                     collected,
                     held,

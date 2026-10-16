@@ -125,9 +125,9 @@ impl Window {
         }
     }
 
-    pub(crate) fn host(&self) -> Option<String> {
+    pub(crate) fn url(&self) -> Option<String> {
         let url = unsafe { self.view.URL() }?;
-        url.host().map(|host| host.to_string())
+        url.absoluteString().map(|url| url.to_string())
     }
 
     /// Hands back a finished cookie fetch, or starts one when none is in flight.

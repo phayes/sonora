@@ -25,6 +25,7 @@ mod spectrum;
 pub mod spotify;
 mod stream;
 pub mod subsonic;
+pub mod tidal;
 mod trim;
 pub mod trouble;
 pub mod youtube;
@@ -568,9 +569,19 @@ pub struct AccountChoice {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum SignInPrompt {
     Accounts(Vec<AccountChoice>),
-    Code { code: String, url: String },
+    Code {
+        code: String,
+        url: String,
+    },
     Url(String),
     Secret,
+    /// Open `url` in the app's own browser window. When the page heads for an address starting
+    /// with `redirect`, the window stops it and that full address arrives as input. Closing the
+    /// window cancels the sign-in.
+    Browser {
+        url: String,
+        redirect: String,
+    },
 }
 
 pub type PromptSink = Arc<dyn Fn(SignInPrompt) + Send + Sync>;
@@ -694,6 +705,10 @@ pub trait MusicProvider: Send + Sync {
     /// sign-in, and the app offers no `Secret` option for it.
     fn web_sign_in(&self) -> Option<WebSignIn> {
         None
+    }
+    /// Whether signing in sends `SignInPrompt::Browser`, so it needs the app's browser window.
+    fn browser_sign_in(&self) -> bool {
+        false
     }
 }
 

@@ -20,7 +20,7 @@ impl Window {
         true
     }
 
-    pub(crate) fn host(&self) -> Option<String> {
+    pub(crate) fn url(&self) -> Option<String> {
         None
     }
 

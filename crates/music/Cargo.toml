@@ -49,6 +49,7 @@ serde_norway.workspace = true
 storage.workspace = true
 symphonia.workspace = true
 tempfile.workspace = true
+tidalrs.workspace = true
 time.workspace = true
 tokio.workspace = true
 widevine.workspace = true

@@ -8,7 +8,8 @@
 //! The first job is signing in: the user works through the provider's pages and the proof cookies
 //! are the session. The second is running a script on a page the app cannot reach any other way,
 //! which is how YouTube's proof-of-origin token is minted; that window is hidden and its script
-//! leaves the answer in a cookie the same poll reads.
+//! leaves the answer in a cookie the same poll reads. An OAuth sign-in is done instead once the
+//! page lands on the redirect address, and that address, code and all, is what comes back.
 //!
 //! An account provider can finish the sign-in on an interstitial of its own — Google's security
 //! check-up, say — that jumps straight to the return url and skips the hop that hands the account
@@ -45,21 +46,17 @@ mod unsupported;
 #[cfg(not(any(target_os = "macos", target_os = "windows", target_os = "linux")))]
 use unsupported as platform;
 
-/// What a window is asked to do. `url` opens first. `landing` scopes cookie reads on platforms
-/// whose cookie store asks for a URL. The window is done as soon as the cookies for `domain`
-/// carry at least one of the `proof` names.
+/// What a window is asked to do. `url` opens first, and `finish` says when the window is done.
 ///
 /// Two kinds of window fit this. A sign-in window is shown and carries no script: the user works
-/// through the provider's pages and the proof cookies are the session. A scripted window is
-/// hidden and runs `script` on every page it loads, which does its work and leaves the answer in
-/// a cookie named in `proof`; nothing about it is a sign-in, and the retry that recovers a
-/// skipped hand-off is left out.
+/// through the provider's pages and the proof cookies, or the redirect address, are the session.
+/// A scripted window is hidden and runs `script` on every page it loads, which does its work and
+/// leaves the answer in a cookie named in `proof`; nothing about it is a sign-in, and the retry
+/// that recovers a skipped hand-off is left out.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Target {
     pub url: String,
-    pub landing: String,
-    pub domain: String,
-    pub proof: Vec<String>,
+    pub finish: Finish,
     pub title: String,
     /// A user agent the window presents instead of the backend's default, when the provider
     /// needs one that matches the engine the backend drives.
@@ -67,6 +64,20 @@ pub struct Target {
     /// Javascript to run in every page the window loads, before the page's own scripts. A window
     /// with one is a scripted window and is never shown.
     pub script: Option<String>,
+}
+
+/// When a window is done.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Finish {
+    /// Once the cookies for `domain` carry at least one of the `proof` names with a value.
+    /// `landing` scopes cookie reads on platforms whose cookie store asks for a URL.
+    Cookies {
+        landing: String,
+        domain: String,
+        proof: Vec<String>,
+    },
+    /// Once the page is at an address starting with `prefix`.
+    Redirect { prefix: String },
 }
 
 impl Target {
@@ -93,6 +104,8 @@ pub enum Poll {
     Closed,
     /// The `Cookie` header for the target's domain. The window has closed itself.
     Cookies(String),
+    /// The address a redirect window landed on. The window has closed itself.
+    Redirect(String),
 }
 
 /// A browser window driving one [`Target`]. Open it on the main thread and poll it from there;
@@ -135,39 +148,49 @@ impl Page {
     }
 
     /// Checks where the window is. Call it every few hundred milliseconds until it stops answering
-    /// `Pending`; the cookies come back once, and the window closes on that poll.
+    /// `Pending`; the cookies or the redirect come back once, and the window closes on that poll.
     pub fn poll(&mut self) -> Poll {
         if self.window.closed() {
             return Poll::Closed;
         }
+        let (domain, proof) = match &self.target.finish {
+            Finish::Cookies { domain, proof, .. } => (domain.clone(), proof.clone()),
+            Finish::Redirect { prefix } => {
+                let Some(url) = self.window.url().filter(|url| url.starts_with(prefix)) else {
+                    return Poll::Pending;
+                };
+                self.window.close();
+                return Poll::Redirect(url);
+            }
+        };
         let Some(cookies) = self.window.fetch() else {
             return Poll::Pending;
         };
-        let header = header(&cookies, &self.target.domain);
-        match proven(&header, &self.target.proof) {
+        let header = header(&cookies, &domain);
+        match proven(&header, &proof) {
             true => {
                 self.window.close();
                 Poll::Cookies(header)
             }
             false => {
-                self.retry();
+                self.retry(&domain);
                 Poll::Pending
             }
         }
     }
 
-    /// Loads the sign-in url again when the page is on the provider's domain without a session,
+    /// Loads the sign-in url again when the page is on the provider's `domain` without a session,
     /// once. Any page of the domain counts, not only the landing: a skipped hand-off can end on
     /// an error page of the provider's just as well. A scripted window has no hand-off to
     /// recover, and reloading would only throw away the work its script is in the middle of.
-    fn retry(&mut self) {
+    fn retry(&mut self, domain: &str) {
         if self.retried || self.target.scripted() {
             return;
         }
-        let Some(host) = self.window.host() else {
+        let Some(host) = self.window.url().as_deref().and_then(host) else {
             return;
         };
-        if !matches(&host, &self.target.domain) {
+        if !matches(&host, domain) {
             return;
         }
         log::debug!("webview: {host} came up signed out, loading the sign-in url again");
@@ -184,6 +207,20 @@ fn header(cookies: &[Cookie], domain: &str) -> String {
         .map(|cookie| format!("{}={}", cookie.name, cookie.value))
         .collect::<Vec<_>>()
         .join("; ")
+}
+
+/// Extracts the host from the absolute HTTP(S) url a webview reports for its page.
+fn host(url: &str) -> Option<String> {
+    let (_, rest) = url.split_once("://")?;
+    let authority = rest.split(['/', '?', '#']).next()?;
+    let authority = authority
+        .rsplit_once('@')
+        .map_or(authority, |(_, host)| host);
+    let host = authority
+        .strip_prefix('[')
+        .and_then(|host| host.split_once(']').map(|(host, _)| host))
+        .unwrap_or_else(|| authority.split(':').next().unwrap_or(authority));
+    (!host.is_empty()).then(|| host.to_ascii_lowercase())
 }
 
 /// Whether a cookie stored for `stored` is sent to `domain` and its subdomains.

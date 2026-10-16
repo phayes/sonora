@@ -83,12 +83,11 @@ impl Window {
         !unsafe { IsWindow(Some(self.hwnd)) }.as_bool()
     }
 
-    pub(crate) fn host(&self) -> Option<String> {
+    pub(crate) fn url(&self) -> Option<String> {
         let view = self.browser.borrow().as_ref()?.view.clone();
         let mut source = PWSTR::null();
         unsafe { view.Source(&mut source) }.ok()?;
-        let source = CoTaskMemPWSTR::from(source).to_string();
-        crate::native::host(&source)
+        Some(CoTaskMemPWSTR::from(source).to_string())
     }
 
     /// Hands back a finished cookie fetch, or starts one when none is in flight.
